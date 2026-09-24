@@ -1,281 +1,136 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
-const multer = require('multer');
-const FormData = require('form-data');
-const fs = require('fs');
-const path = require('path');
+import express from 'express';
+import multer from 'multer';
+import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import TelegramBot from 'node-telegram-bot-api';
+
+const BOT_TOKEN = process.env.BOT_TOKEN || '8854543943:AAFQ0pz_PhPqxfm9pP9G6bBBRVZ1KQLWFT4';
+const CHANNEL_ID = process.env.CHANNEL_ID || '-1004293229182';
+const ADMIN_KEY = process.env.ADMIN_KEY || 'alamin-boss-key-123';
+const PORT = process.env.PORT || 3000;
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json());
+app.use('/uploads', express.static('uploads'));
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHAT_ID   = process.env.CHAT_ID;
-const PORT      = process.env.PORT || 3000;
-const BASE_URL  = process.env.BASE_URL || `http://localhost:${PORT}`;
-const API       = `https://api.telegram.org/bot${BOT_TOKEN}`;
-
-if (!BOT_TOKEN || !CHAT_ID) {
-    console.error('❌ .env এ BOT_TOKEN বা CHAT_ID নেই');
-    process.exit(1);
-}
-
-/* ফাইল আপলোড */
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
+if (!fs.existsSync('videos.json')) fs.writeFileSync('videos.json', '[]');
 
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname) || '.mp4';
-        cb(null, `${Date.now()}_${Math.random().toString(36).slice(2,8)}${ext}`);
-    }
+    destination: 'uploads/',
+    filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
 });
-const upload = multer({
-    storage,
-    limits: { fileSize: 2 * 1024 * 1024 * 1024 }
-});
+const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
 
-/* ডাটা স্টোর */
-const DATA_FILE = path.join(__dirname, 'videos.json');
-function loadVideos() {
+const loadVideos = () => JSON.parse(fs.readFileSync('videos.json'));
+const saveVideos = (v) => fs.writeFileSync('videos.json', JSON.stringify(v, null, 2));
+
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+bot.on('video', async (msg) => {
     try {
-        if (!fs.existsSync(DATA_FILE)) return [];
-        return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    } catch { return []; }
-}
-function saveVideos(v) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(v, null, 2));
-}
-
-/* Telegram হেল্পার */
-async function sendTelegramMessage(text) {
-    try {
-        await axios.post(`${API}/sendMessage`, {
-            chat_id: CHAT_ID, text, parse_mode: 'HTML'
-        });
-    } catch (e) { console.warn('TG msg:', e.message); }
-}
-
-async function getTelegramFileUrl(fileId) {
-    try {
-        const r = await axios.get(`${API}/getFile?file_id=${fileId}`);
-        return `https://api.telegram.org/file/bot${BOT_TOKEN}/${r.data.result.file_path}`;
-    } catch { return null; }
-}
-
-/* ===== CORS ===== */
-app.use(cors({
-    origin: '*',
-    methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-    allowedHeaders: ['Content-Type']
-}));
-
-/* ===== API Routes ===== */
-
-app.get('/', (req, res) => {
-    res.json({
-        status: 'ok',
-        message: 'TG Video API চলছে',
-        endpoints: [
-            'GET  /api/health',
-            'GET  /api/videos',
-            'POST /api/upload-url',
-            'POST /api/upload-file',
-            'PUT  /api/videos/:id',
-            'DELETE /api/videos/:id',
-            'GET  /api/stream/:id',
-            'GET  /api/set-webhook',
-            'GET  /api/webhook-info'
-        ]
-    });
-});
-
-app.get('/api/videos', (req, res) => res.json(loadVideos()));
-
-app.post('/api/upload-url', async (req, res) => {
-    try {
-        const { title, desc, videoUrl, isDrive } = req.body;
-        if (!title) return res.status(400).json({ error: 'শিরোনাম দিন' });
-        if (!videoUrl) return res.status(400).json({ error: 'লিংক দিন' });
-
+        const title = msg.caption || 'শিরোনামহীন পট';
+        const sent = await bot.forwardMessage(CHANNEL_ID, msg.chat.id, msg.message_id);
         const videos = loadVideos();
-        const v = {
-            id: Date.now(), title: title.trim(),
-            desc: (desc || '').trim(),
-            date: new Date().toISOString(),
-            videoUrl: videoUrl.trim(),
-            isDrive: !!isDrive, isTelegram: false,
-            source: isDrive ? 'drive' : 'url',
-            videoFileName: isDrive ? 'Drive ভিডিও' : 'URL ভিডিও'
-        };
-        videos.unshift(v);
+        videos.push({
+            id: Date.now(), title, desc: msg.caption || '', cat: 'সাধারণ',
+            tgFileId: sent.video.file_id,
+            date: new Date().toISOString(), source: 'telegram'
+        });
         saveVideos(videos);
-        await sendTelegramMessage(`🎬 নতুন: <b>${title}</b>\n\n${desc || ''}`);
-        res.json({ success: true, video: v });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
+        bot.sendMessage(msg.chat.id, `✅ সংরক্ষিত: ${title}`);
+    } catch (err) {
+        bot.sendMessage(msg.chat.id, `❌ ${err.message}`);
     }
 });
 
-app.post('/api/upload-file', upload.single('video'), async (req, res) => {
-    try {
-        if (!req.file) return res.status(400).json({ error: 'ফাইল নেই' });
-        const { title, desc } = req.body;
-        if (!title) return res.status(400).json({ error: 'শিরোনাম দিন' });
+function checkAdmin(req, res, next) {
+    const key = req.headers['x-admin-key'] || req.query.key;
+    if (key !== ADMIN_KEY) return res.status(401).json({ error: 'অনুমতি নেই' });
+    next();
+}
 
-        const isLarge = req.file.size > 50 * 1024 * 1024;
-        const method = isLarge ? 'sendDocument' : 'sendVideo';
-
-        const form = new FormData();
-        form.append('chat_id', CHAT_ID);
-        form.append('caption', `🎬 <b>${title}</b>\n\n${desc || ''}`);
-        form.append('parse_mode', 'HTML');
-        if (!isLarge) form.append('supports_streaming', 'true');
-        form.append(isLarge ? 'document' : 'video',
-            fs.createReadStream(req.file.path),
-            { filename: req.file.originalname, contentType: req.file.mimetype }
-        );
-
-        const tg = await axios.post(`${API}/${method}`, form, {
-            headers: form.getHeaders(),
-            maxBodyLength: Infinity,
-            maxContentLength: Infinity,
-            timeout: 10 * 60 * 1000
-        });
-
-        const result = tg.data.result;
-        const fileId = (result.video || result.document).file_id;
-
-        const videos = loadVideos();
-        const v = {
-            id: Date.now(), title: title.trim(),
-            desc: (desc || '').trim(),
-            date: new Date().toISOString(),
-            videoUrl: `/uploads/${path.basename(req.file.path)}`,
-            telegramFileId: fileId,
-            telegramMessageId: result.message_id,
-            isDrive: false, isTelegram: true,
-            source: 'file',
-            videoFileName: req.file.originalname
-        };
-        videos.unshift(v);
-        saveVideos(videos);
-        res.json({ success: true, video: v });
-    } catch (e) {
-        console.error('File upload:', e.response?.data || e.message);
-        if (req.file?.path && fs.existsSync(req.file.path)) {
-            try { fs.unlinkSync(req.file.path); } catch {}
-        }
-        res.status(500).json({
-            error: e.response?.data?.description || e.message
-        });
-    }
-});
-
-app.put('/api/videos/:id', (req, res) => {
+app.get('/api/videos', (req, res) => {
     const videos = loadVideos();
-    const i = videos.findIndex(v => v.id == req.params.id);
-    if (i === -1) return res.status(404).json({ error: 'পাওয়া যায়নি' });
-    if (req.body.title !== undefined) videos[i].title = req.body.title;
-    if (req.body.desc !== undefined) videos[i].desc = req.body.desc;
-    saveVideos(videos);
-    res.json({ success: true, video: videos[i] });
-});
-
-app.delete('/api/videos/:id', async (req, res) => {
-    let videos = loadVideos();
-    const v = videos.find(x => x.id == req.params.id);
-    if (v?.videoUrl?.startsWith('/uploads/')) {
-        const fp = path.join(__dirname, v.videoUrl);
-        try { if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch {}
-    }
-    if (v?.telegramMessageId) {
-        try {
-            await axios.post(`${API}/deleteMessage`, {
-                chat_id: CHAT_ID, message_id: v.telegramMessageId
-            });
-        } catch {}
-    }
-    videos = videos.filter(x => x.id != req.params.id);
-    saveVideos(videos);
-    res.json({ success: true });
+    const safe = videos.map(v => ({
+        id: v.id, title: v.title, desc: v.desc, cat: v.cat,
+        date: v.date, source: v.source,
+        thumbUrl: v.thumbFile ? `/uploads/${v.thumbFile}` : null,
+        streamUrl: `/api/stream/${v.id}`
+    }));
+    res.json(safe);
 });
 
 app.get('/api/stream/:id', async (req, res) => {
-    const v = loadVideos().find(x => x.id == req.params.id);
-    if (!v) return res.status(404).json({ error: 'পাওয়া যায়নি' });
-    if (v.videoUrl?.startsWith('/uploads/'))
-        return res.json({ url: v.videoUrl, type: 'local' });
-    if (v.telegramFileId) {
-        const url = await getTelegramFileUrl(v.telegramFileId);
-        return res.json({ url, type: 'telegram' });
+    const video = loadVideos().find(v => v.id == req.params.id);
+    if (!video) return res.status(404).send('পাওয়া যায়নি');
+
+    if (video.source === 'telegram' && video.tgFileId) {
+        try {
+            const link = await bot.getFileLink(video.tgFileId);
+            return res.redirect(link);
+        } catch (err) {
+            return res.status(500).send('টেলিগ্রাম সমস্যা: ' + err.message);
+        }
     }
-    res.json({ url: v.videoUrl, type: 'external' });
+    if (video.videoFile) return res.sendFile(path.resolve('uploads/' + video.videoFile));
+    res.status(404).send('ফাইল নেই');
 });
 
-app.post('/api/telegram-webhook', async (req, res) => {
-    res.sendStatus(200);
-    try {
-        const msg = req.body.message || req.body.channel_post;
-        if (!msg) return;
-        let fileId = null, title = '';
-        const desc = msg.caption || '';
-        if (msg.video) {
-            fileId = msg.video.file_id;
-            title = desc.split('\n')[0]?.trim() || 'টেলিগ্রাম ভিডিও';
-        } else if (msg.document?.mime_type?.startsWith('video/')) {
-            fileId = msg.document.file_id;
-            title = msg.document.file_name || 'টেলিগ্রাম ভিডিও';
-        } else return;
+app.post('/api/admin/upload',
+    checkAdmin,
+    upload.fields([{ name: 'video', maxCount: 1 }, { name: 'thumb', maxCount: 1 }]),
+    async (req, res) => {
+        try {
+            const { title, desc, cat, videoUrl } = req.body;
+            if (!title) return res.status(400).json({ error: 'শিরোনাম দিন' });
+            const videoFile = req.files?.video?.[0];
+            const thumbFile = req.files?.thumb?.[0];
+            if (!videoFile && !videoUrl) return res.status(400).json({ error: 'ভিডিও দিন' });
 
-        const url = await getTelegramFileUrl(fileId);
-        if (!url) return;
-
-        const videos = loadVideos();
-        if (videos.some(v => v.telegramFileId === fileId)) return;
-
-        videos.unshift({
-            id: Date.now(), title, desc,
-            date: new Date().toISOString(),
-            videoUrl: url, telegramFileId: fileId,
-            telegramMessageId: msg.message_id,
-            isDrive: false, isTelegram: true,
-            source: 'telegram', videoFileName: 'Telegram ভিডিও'
-        });
-        saveVideos(videos);
-        await sendTelegramMessage(`✅ সেভ: <b>${title}</b>`);
-    } catch (e) { console.error(e); }
-});
-
-app.get('/api/set-webhook', async (req, res) => {
-    const url = req.query.url || `${BASE_URL}/api/telegram-webhook`;
-    try {
-        const r = await axios.get(`${API}/setWebhook?url=${encodeURIComponent(url)}`);
-        res.json({ ...r.data, webhook: url });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
+            const newVideo = {
+                id: Date.now(), title, desc: desc || '', cat: cat || 'সাধারণ',
+                date: new Date().toISOString(),
+                source: videoFile ? 'file' : 'url',
+                videoFile: videoFile ? videoFile.filename : null,
+                thumbFile: thumbFile ? thumbFile.filename : null,
+                videoUrl: videoUrl || null
+            };
+            const videos = loadVideos();
+            videos.push(newVideo);
+            saveVideos(videos);
+            res.json({ success: true, video: newVideo });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
     }
+);
+
+app.delete('/api/admin/video/:id', checkAdmin, (req, res) => {
+    const videos = loadVideos();
+    const video = videos.find(v => v.id == req.params.id);
+    if (!video) return res.status(404).json({ error: 'পাওয়া যায়নি' });
+    if (video.videoFile) { try { fs.unlinkSync('uploads/' + video.videoFile); } catch (e) {} }
+    if (video.thumbFile) { try { fs.unlinkSync('uploads/' + video.thumbFile); } catch (e) {} }
+    saveVideos(videos.filter(v => v.id != req.params.id));
+    res.json({ success: true });
 });
 
-app.get('/api/webhook-info', async (req, res) => {
-    try { res.json((await axios.get(`${API}/getWebhookInfo`)).data); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+app.put('/api/admin/video/:id', checkAdmin, (req, res) => {
+    const videos = loadVideos();
+    const video = videos.find(v => v.id == req.params.id);
+    if (!video) return res.status(404).json({ error: 'পাওয়া যায়নি' });
+    if (req.body.title) video.title = req.body.title;
+    if (req.body.desc !== undefined) video.desc = req.body.desc;
+    if (req.body.cat) video.cat = req.body.cat;
+    saveVideos(videos);
+    res.json({ success: true, video });
 });
 
-app.get('/api/health', async (req, res) => {
-    try {
-        const me = await axios.get(`${API}/getMe`);
-        res.json({
-            ok: true, bot: me.data.result.username,
-            videos: loadVideos().length,
-            time: new Date().toISOString()
-        });
-    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+app.get('/', (req, res) => {
+    res.json({ status: 'running', totalVideos: loadVideos().length });
 });
 
-app.listen(PORT, () => {
-    console.log(`✅ সার্ভার: ${BASE_URL}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`✅ সার্ভার চালু: পোর্ট ${PORT}`));
